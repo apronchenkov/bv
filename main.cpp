@@ -404,7 +404,7 @@ std::string nextProgram()
     for (std::string line; std::getline(std::cin, line); ) {
         line = line.substr(line.find('(')); // drop everything before the program
         while (!line.empty() && ::isspace(static_cast<unsigned char>(line.back()))) {
-            line.pop_back();
+            line.resize(line.size() - 1);
         }
         if (!line.empty()) {
             return line;
