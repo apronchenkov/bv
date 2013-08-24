@@ -8,4 +8,4 @@ else:
    env.Append(CXXFLAGS=['-O3', '-g', '-std=c++0x', '-Wall', '-Wextra', '-pedantic', '-pthread'])
    env.Append(LINKFLAGS=['-pthread'])
 
-env.Program(source=['main.cpp', 'block.cpp'])
+env.Program(source=['main.cpp', 'block.cpp'], LIBS=['perfmon'])

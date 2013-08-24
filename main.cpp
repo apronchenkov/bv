@@ -1,6 +1,6 @@
 #include "block.h"
 #include "test_block.h"
-
+#include <perfmon.h>
 #include <cctype>
 #include <iostream>
 #include <set>
@@ -208,6 +208,7 @@ bool readLambda(std::streambuf* const istreambuf, Block* block)
 
 Block parseLambda(const std::string& expression)
 {
+    PERFMON_FUNCTION_SCOPE;
     Block result(0);
     std::stringbuf istreambuf(expression);
     std::string tmp;
@@ -400,6 +401,7 @@ std::mutex g_io_mutex;
 
 std::string nextProgram()
 {
+    PERFMON_FUNCTION_SCOPE;
     std::lock_guard<std::mutex> lock(g_io_mutex);
     for (std::string line; std::getline(std::cin, line); ) {
         line = line.substr(line.find('(')); // drop everything before the program
@@ -415,6 +417,7 @@ std::string nextProgram()
 
 void putResult(uint64_t hash, const std::string& program)
 {
+    PERFMON_FUNCTION_SCOPE;
     std::lock_guard<std::mutex> lock(g_io_mutex);
     std::cout << hash << '\t' << program << '\n';
 }
@@ -436,6 +439,7 @@ void threadMain(const std::vector<uint64_t>& input_values)
         }
 
         std::vector<uint64_t> output_values;
+        PERFMON_STATEMENT("eval")
         for (uint64_t value : input_values) {
             output_values.push_back(block.execute({value}));
         }
@@ -501,6 +505,10 @@ int main(int argc, char** argv)
         if (thread.joinable()) {
             thread.join();
         }
+    }
+
+    for (const auto& counter : PERFMON_COUNTERS) {
+        std::cerr << counter.Name() << ": " << counter.Calls() << ' ' << counter.Seconds() << "seconds\n";
     }
 
     return 0;
