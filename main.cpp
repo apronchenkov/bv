@@ -493,12 +493,12 @@ int main(int argc, char** argv)
 
     std::vector<std::thread> thread_group;
     try {
-      for (int index = 0; index < 3; ++index) {
-        thread_group.emplace_back(threadMain, std::cref(input_values));
-      }
+        for (int index = 0; index < 3; ++index) {
+            thread_group.emplace_back(threadMain, std::cref(input_values));
+        }
     } catch (const std::exception& ex) {
-      std::cerr << "Exception: " << ex.what() << '\n';
-      return -1;
+        std::cerr << "Exception: " << ex.what() << '\n';
+        return -1;
     }
 
     for (auto& thread : thread_group) {
