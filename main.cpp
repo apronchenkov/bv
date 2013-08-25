@@ -1,11 +1,13 @@
-#include "block.h"
-#include "test_block.h"
-#include <perfmon.h>
+#include "require.h"
+
 #include <cctype>
 #include <iostream>
+#include <jit/jit.h>
 #include <set>
 #include <map>
 #include <sstream>
+#include <vector>
+#include <perfmon.h>
 
 
 bool nextToken(std::streambuf* const istreambuf, std::string* token)
@@ -48,7 +50,8 @@ bool toInteger(const std::string& input, uint64_t* result)
 }
 
 
-typedef std::map<std::string, int> Variables;
+typedef std::map<std::string, jit_value_t> Variables;
+
 
 bool isIdentifier(const std::string& token)
 {
@@ -63,252 +66,312 @@ bool isIdentifier(const std::string& token)
     return !::isdigit(static_cast<unsigned char>(token.at(0))) && KEYWORD.count(token) == 0;
 }
 
-bool readBlock(std::streambuf* const istreambuf, const Variables& variables, Block* const block)
+
+jit_value_t readBlock(jit_context_t context, jit_function_t function, const Variables& variables, std::streambuf* const istreambuf)
 {
     std::string token;
     if (!nextToken(istreambuf, &token)) {
-        return false;
+        return nullptr;
     }
 
     const auto it = variables.find(token);
     if (it != variables.end()) {
-        block->emitLoadArg(it->second);
-        return true;
+        return it->second;
     }
 
     uint64_t c;
     if (toInteger(token, &c)) {
-        block->emitLoadConst(c);
-        return true;
+        return jit_value_create_nint_constant(function, jit_type_ulong, c);
     }
 
     if (token != "(" || !nextToken(istreambuf, &token)) {
-        return false;
+        return nullptr;
     }
 
+    jit_value_t result = nullptr;
+    if (token == "not") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            result = jit_insn_not(function, left);
+        }
 
-#define OP1(name, emit)                                                 \
-    if (token == name) {                                                \
-        if (readBlock(istreambuf, variables, block) &&                  \
-            nextToken(istreambuf, &token) && token == ")")              \
-        {                                                               \
-            block-> emit ();                                            \
-            return true;                                                \
-        }                                                               \
-        return false;                                                   \
+    } else if (token == "shl1") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            result = jit_insn_shl(function, left, jit_value_create_nint_constant(function, jit_type_int, 1));
+        }
+
+    } else if (token == "shr1") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            result = jit_insn_shr(function, left, jit_value_create_nint_constant(function, jit_type_int, 1));
+        }
+
+    } else if (token == "shr4") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            result = jit_insn_shr(function, left, jit_value_create_nint_constant(function, jit_type_int, 4));
+        }
+
+    } else if (token == "shr16") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            result = jit_insn_shr(function, left, jit_value_create_nint_constant(function, jit_type_int, 16));
+        }
+
+    } else if (token == "and") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            if (auto right = readBlock(context, function, variables, istreambuf)) {
+                result = jit_insn_and(function, left, right);
+            }
+        }
+    } else if (token == "or") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            if (auto right = readBlock(context, function, variables, istreambuf)) {
+                result = jit_insn_or(function, left, right);
+            }
+        }
+    } else if (token == "xor") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            if (auto right = readBlock(context, function, variables, istreambuf)) {
+                result = jit_insn_xor(function, left, right);
+            }
+        }
+    } else if (token == "plus") {
+        if (auto left = readBlock(context, function, variables, istreambuf)) {
+            if (auto right = readBlock(context, function, variables, istreambuf)) {
+                result = jit_insn_add(function, left, right);
+            }
+        }
+
+    } else if (token == "if0") {
+        jit_value_t ifResult = jit_value_create(function, jit_type_ulong);
+        jit_label_t elseLabel = jit_label_undefined;
+        jit_label_t endIfLabel = jit_label_undefined;
+
+        if (auto condition = readBlock(context, function, variables, istreambuf)) {
+            jit_insn_branch_if(function, condition, &elseLabel);
+            if (auto ifBodyResult = readBlock(context, function, variables, istreambuf)) {
+                jit_insn_store(function, ifResult, ifBodyResult);
+                jit_insn_branch(function, &endIfLabel);
+                jit_insn_label(function, &elseLabel);
+                if (auto ifElseResult = readBlock(context, function, variables, istreambuf)) {
+                    jit_insn_store(function, ifResult, ifElseResult);
+                    jit_insn_label(function, &endIfLabel);
+                    result = ifResult;
+                }
+            }
+        }
     }
 
-#define OP2(name, emit)                                                 \
-    if (token == name) {                                                \
-        if (readBlock(istreambuf, variables, block) &&                  \
-            readBlock(istreambuf, variables, block) &&                  \
-            nextToken(istreambuf, &token) && token == ")")              \
-        {                                                               \
-            block-> emit ();                                            \
-            return true;                                                \
-        }                                                               \
-        return false;                                                   \
+    if (nextToken(istreambuf, &token) && token == ")") {
+        return result;
     }
-
-    OP1("not", emitNot);
-    OP1("shl1", emitShl1);
-    OP1("shr1", emitShr1);
-    OP1("shr4", emitShr4);
-    OP1("shr16", emitShr16);
-
-    OP2("and", emitAnd);
-    OP2("or", emitOr);
-    OP2("xor", emitXor);
-    OP2("plus", emitPlus);
-
-#undef OP2
-#undef OP1
-
-    if (token == "if0") {
-        Block ifBlock(0), elseBlock(0);
-        if (readBlock(istreambuf, variables, block) &&
-            readBlock(istreambuf, variables, &ifBlock) &&
-            readBlock(istreambuf, variables, &elseBlock) &&
-            nextToken(istreambuf, &token) && token == ")")
-        {
-            block->emitIf0(ifBlock, elseBlock);
-            return true;
-        }
-        return false;
-    }
-
-    if (token == "fold") {
-        // "(fold integer accumulator (lambda (x y) block)"
-        //   lambda (x y) ...
-        // x8 x7 x6 x5 x4 x3 x2 x1 accumulator $storeArg2 $storeArg3 $block ...
-        //
-
-        if (!readBlock(istreambuf, variables, block)) {
-            return false;
-        }
-        block->emitUnfold();
-        if (!readBlock(istreambuf, variables, block)) {
-            return false;
-        }
-
-        std::string leftArg, rightArg;
-        if (!nextToken(istreambuf, &token) || token != "(" ||
-            !nextToken(istreambuf, &token) || token != "lambda" ||
-            !nextToken(istreambuf, &token) || token != "(" ||
-            !nextToken(istreambuf, &leftArg) || !isIdentifier(leftArg) ||
-            !nextToken(istreambuf, &rightArg) || !isIdentifier(rightArg) ||
-            !nextToken(istreambuf, &token) || token != ")" ||
-            leftArg == rightArg)
-        {
-            return false;
-        }
-
-        auto foldVariables = variables;
-        const int leftArgN = foldVariables.size();
-        foldVariables[leftArg] = leftArgN;
-        foldVariables[rightArg] = leftArgN + 1;
-
-        Block foldBlock(0);
-        if (!readBlock(istreambuf, foldVariables, &foldBlock)) {
-            return false;
-        }
-        for (int index = 0; index < 8; ++index) {
-            block->emitStoreArg(leftArgN + 1);
-            block->emitStoreArg(leftArgN);
-            block->emitBlock(foldBlock);
-        }
-        return (nextToken(istreambuf, &token) && token == ")" &&
-                nextToken(istreambuf, &token) && token == ")");
-    }
-
-    return false;
+    return nullptr;
 }
 
-bool readLambda(std::streambuf* const istreambuf, Block* block)
+
+jit_function_t readLambda(jit_context_t context, jit_function_t parentFunction, Variables variables, std::streambuf* const istreambuf)
 {
     std::string token;
     if (!nextToken(istreambuf, &token) || token != "(" ||
         !nextToken(istreambuf, &token) || token != "lambda" ||
         !nextToken(istreambuf, &token) || token != "(")
     {
-        return false;
+        return nullptr;
     }
 
-    Variables variables;
+    std::map<std::string, int> args;
     while (nextToken(istreambuf, &token) && isIdentifier(token)) {
-        const int v = variables.size();
-        variables[token] = v;
+        if (!args.insert({token, args.size()}).second) {
+            return nullptr;
+        }
+    }
+    if (token != ")") {
+        return nullptr;
     }
 
-    return
-        token == ")" &&
-        readBlock(istreambuf, variables, block) &&
-        nextToken(istreambuf, &token) && token == ")";
+    jit_function_t function = nullptr;
+    {
+        std::vector<jit_type_t> params(args.size(), jit_type_ulong);
+        jit_type_t signature = jit_type_create_signature(jit_abi_cdecl, jit_type_ulong, &params[0], params.size(), 1);
+        if (parentFunction) {
+            function = jit_function_create_nested(context, signature, parentFunction);
+        } else {
+            function = jit_function_create(context, signature);
+        }
+        jit_function_set_optimization_level(function, jit_function_get_max_optimization_level());
+        jit_type_free(signature);
+    }
+
+    for (const auto& arg : args) {
+        variables[arg.first] = jit_value_get_param(function, arg.second);
+    }
+
+    const auto value = readBlock(context, function, variables, istreambuf);
+    if (!value || !nextToken(istreambuf, &token) || token != ")") {
+        jit_function_abandon(function);
+        return nullptr;
+    }
+
+    jit_insn_return(function, value);
+    jit_function_compile(function);
+    return function;
 }
 
-Block parseLambda(const std::string& expression)
+
+jit_function_t parseLambda(jit_context_t context, const std::string& expression)
 {
     PERFMON_FUNCTION_SCOPE;
-    Block result(0);
-    std::stringbuf istreambuf(expression);
-    std::string tmp;
-    require (readLambda(&istreambuf, &result) && !nextToken(&istreambuf, &tmp), "Unabled to parse lambda expression.");
+    jit_context_build_start(context);
 
+    std::stringbuf istreambuf(expression);
+    const auto function = readLambda(context, nullptr, Variables(), &istreambuf);
+
+    std::string tmp;
+    if (!function || nextToken(&istreambuf, &tmp)) {
+        jit_function_abandon(function);
+        jit_context_build_end(context);
+        return nullptr;
+    }
+
+    jit_context_build_end(context);
+    return function;
+}
+
+uint64_t call(jit_function_t function, const std::vector<uint64_t>& args)
+{
+    std::vector<void*> argv;
+    for (auto& arg : args) {
+        argv.push_back((void*)&arg);
+    }
+    uint64_t result;
+    jit_function_apply(function, &argv[0], &result);
     return result;
 }
 
+
 void test_read_not()
 {
-    const auto block = parseLambda("(lambda (x) (not x))");
-    require (block.execute({0x0000000000000000UL}) == 0xffffffffffffffffUL &&
-             block.execute({0xffffffffffffffffUL}) == 0x0000000000000000UL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x) (not x))");
+    require (function, "READ_NOT: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL}) == 0xffffffffffffffffUL &&
+             call(function, {0xffffffffffffffffUL}) == 0x0000000000000000UL,
              "READ_NOT is broken");
+    jit_context_destroy(context);
 }
 
 void test_read_shl1()
 {
-    const auto block = parseLambda("(lambda (x) (shl1 x))");
-    require (block.execute({0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0xffffffffffffffffUL}) == 0xfffffffffffffffeUL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x) (shl1 x))");
+    require (function, "READ_SHL1: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0xffffffffffffffffUL}) == 0xfffffffffffffffeUL,
              "READ_SHL1 is broken");
+    jit_context_destroy(context);
 }
 
 void test_read_shr1()
 {
-    const auto block = parseLambda("(lambda (x) (shr1 x))");
-    require (block.execute({0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0xffffffffffffffffUL}) == 0x7fffffffffffffffUL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x) (shr1 x))");
+    require (function, "READ_SHR1: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0xffffffffffffffffUL}) == 0x7fffffffffffffffUL,
              "READ_SHR1 is broken");
+    jit_context_destroy(context);
 }
 
 void test_read_shr4()
 {
-    const auto block = parseLambda("(lambda (x) (shr4 x))");
-    require (block.execute({0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0xffffffffffffffffUL}) == 0x0fffffffffffffffUL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x) (shr4 x))");
+    require (function, "READ_SHR4: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0xffffffffffffffffUL}) == 0x0fffffffffffffffUL,
              "READ_SHR4 is broken");
+    jit_context_destroy(context);
 }
 
 void test_read_shr16()
 {
-    const auto block = parseLambda("(lambda (x) (shr16 x))");
-    require (block.execute({0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0xffffffffffffffffUL}) == 0x0000ffffffffffffUL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x) (shr16 x))");
+    require (function, "READ_SHR16: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0xffffffffffffffffUL}) == 0x0000ffffffffffffUL,
              "READ_SHR16 is broken");
+    jit_context_destroy(context);
 }
 
 void test_read_and()
 {
-    const auto block = parseLambda("(lambda (x y) (and x y))");
-    require (block.execute({0x0000000000000000UL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0x0000000000000000UL, 0xffffffffffffffffUL}) == 0x0000000000000000UL &&
-             block.execute({0xffffffffffffffffUL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0xffffffffffffffffUL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x y) (and x y))");
+    require (function, "READ_AND: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0x0000000000000000UL, 0xffffffffffffffffUL}) == 0x0000000000000000UL &&
+             call(function, {0xffffffffffffffffUL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0xffffffffffffffffUL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL,
              "READ_AND is broken");
+    jit_context_destroy(context);
 }
 
 void test_read_or()
 {
-    const auto block = parseLambda("(lambda (x y) (or x y))");
-    require (block.execute({0x0000000000000000UL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0x0000000000000000UL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL &&
-             block.execute({0xffffffffffffffffUL, 0x0000000000000000UL}) == 0xffffffffffffffffUL &&
-             block.execute({0xffffffffffffffffUL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x y) (or x y))");
+    require (function, "READ_OR: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0x0000000000000000UL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL &&
+             call(function, {0xffffffffffffffffUL, 0x0000000000000000UL}) == 0xffffffffffffffffUL &&
+             call(function, {0xffffffffffffffffUL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL,
              "READ_OR is broken");
+    jit_context_destroy(context);
 }
 
 void test_read_xor()
 {
-    const auto block = parseLambda("(lambda (x y) (xor x y))");
-    require (block.execute({0x0000000000000000UL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
-             block.execute({0x0000000000000000UL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL &&
-             block.execute({0xffffffffffffffffUL, 0x0000000000000000UL}) == 0xffffffffffffffffUL &&
-             block.execute({0xffffffffffffffffUL, 0xffffffffffffffffUL}) == 0x0000000000000000UL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x y) (xor x y))");
+    require (function, "READ_XOR: Unable to parse lambda.");
+    require (call(function, {0x0000000000000000UL, 0x0000000000000000UL}) == 0x0000000000000000UL &&
+             call(function, {0x0000000000000000UL, 0xffffffffffffffffUL}) == 0xffffffffffffffffUL &&
+             call(function, {0xffffffffffffffffUL, 0x0000000000000000UL}) == 0xffffffffffffffffUL &&
+             call(function, {0xffffffffffffffffUL, 0xffffffffffffffffUL}) == 0x0000000000000000UL,
              "READ_XOR is broken");
+    jit_context_destroy(context);
 }
 
 
 void test_read_plus()
 {
-    const auto block = parseLambda("(lambda (x y) (plus x y))");
-    require (block.execute({0x1111111111111111UL, 0x1111111111111111UL}) == 0x2222222222222222UL &&
-             block.execute({0x2222222222222222UL, 0x2222222222222222UL}) == 0x4444444444444444UL &&
-             block.execute({0x4444444444444444UL, 0x4444444444444444UL}) == 0x8888888888888888UL &&
-             block.execute({0x8888888888888888UL, 0x8888888888888888UL}) == 0x1111111111111110UL &&
-             block.execute({0xffffffffffffffffUL, 0x0000000000000001UL}) == 0x0000000000000000UL,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x y) (plus x y))");
+    require (function, "READ_PLUS: Unable to parse lambda.");
+    require (call(function, {0x1111111111111111UL, 0x1111111111111111UL}) == 0x2222222222222222UL &&
+             call(function, {0x2222222222222222UL, 0x2222222222222222UL}) == 0x4444444444444444UL &&
+             call(function, {0x4444444444444444UL, 0x4444444444444444UL}) == 0x8888888888888888UL &&
+             call(function, {0x8888888888888888UL, 0x8888888888888888UL}) == 0x1111111111111110UL &&
+             call(function, {0xffffffffffffffffUL, 0x0000000000000001UL}) == 0x0000000000000000UL,
              "READ_PLUS is broken");
+    jit_context_destroy(context);
 }
+
 
 void test_read_loadarg()
 {
-    const Variables variables = {
+    const std::map<std::string, int> expressions = {
         {"(lambda (x y z) x)", 0},
         {"(lambda (x y z) y)", 1},
         {"(lambda (x y z) z)", 2},
     };
-    for (const auto& var : variables) {
-        const auto block = parseLambda(var.first);
-        require (block.execute({0, 1, 2}) == static_cast<uint64_t>(var.second), "READ_ARG is broken");
+    const std::vector<uint64_t> args = {
+        0, 1, 2
+    };
+    for (const auto& expression : expressions) {
+        auto context = jit_context_create();
+        auto function = parseLambda(context, expression.first);
+        require (function, "READ_ARG: Unable to parse lambda.");
+        require (call(function, args) == static_cast<uint64_t>(expression.second), "READ_ARG is broken");
+        jit_context_destroy(context);
     }
 }
 
@@ -317,60 +380,29 @@ void test_read_c()
     for (uint64_t i = 0; i < 10; ++i) {
         std::ostringstream buf;
         buf << "(lambda () " << i << ")";
-        const auto block = parseLambda(buf.str());
-        require (block.execute({}) == i, "READ_CONST is broken");
+
+        auto context = jit_context_create();
+        auto function = parseLambda(context, buf.str());
+        require (function, "READ_CONST: Unable to parse lambda.");
+        require (call(function, {}) == i, "READ_CONST is broken");
+        jit_context_destroy(context);
     }
 }
 
 void test_read_if0()
 {
-    const auto block = parseLambda("(lambda (x) (and 0xffffffff87654321 (if0 x 0xf0f0f0f0f0f0f0f0 0x0f0f0f0f0f0f0f0f)))");
-    require (block.execute({0}) == 0xf0f0f0f080604020 &&
-             block.execute({1}) == 0x0f0f0f0f07050301,
+    const auto context = jit_context_create();
+    const auto function = parseLambda(context, "(lambda (x) (and 0xffffffff87654321 (if0 x 0xf0f0f0f0f0f0f0f0 0x0f0f0f0f0f0f0f0f)))");
+    require (function, "READ_IF0: Unable to parse lambda.");
+    require (call(function, {0}) == 0xf0f0f0f080604020 &&
+             call(function, {1}) == 0x0f0f0f0f07050301,
              "READ_IF0 is broken");
-}
-
-void test_read_fold()
-{
-    {
-        const auto block = parseLambda(
-                    "(lambda (x)"
-                    "  (fold x 0"
-                    "    (lambda (x y)"
-                    "      (or x"
-                    "        (shl1"
-                    "          (shl1"
-                    "            (shl1"
-                    "              (shl1 y)"
-                    "            )"
-                    "          )"
-                    "        )"
-                    "      )"
-                    "    )"
-                    "  )"
-                    ")");
-        require (block.execute({0x0706050403020100UL}) == 0x01234567, "READ_FOLD is broken");
-    }
-    {
-        const auto block = parseLambda(
-                    "(lambda (x)"
-                    "  (fold x 0"
-                    "    (lambda (x y)"
-                    "      (if0 x (plus 1 y) y)"
-                    "    )"
-                    "  )"
-                    ")");
-        require (block.execute({0x0101010101010101UL}) == 0, "READ_FOLD is broken");
-        require (block.execute({0x0100010001000100UL}) == 4, "READ_FOLD is broken");
-        require (block.execute({0x0100010001000100UL}) == 4, "READ_FOLD is broken");
-        require (block.execute({0x0000000000000000UL}) == 8, "READ_FOLD is broken");
-    }
+    jit_context_destroy(context);
 }
 
 
 inline void test_read_block()
 {
-    using namespace internal;
     try {
         test_read_not();
         test_read_shl1();
@@ -384,7 +416,6 @@ inline void test_read_block()
         test_read_loadarg();
         test_read_c();
         test_read_if0();
-        test_read_fold();
 
     } catch(const std::exception& ex) {
         std::cerr << "Exception: " << ex.what() << std::endl;
@@ -404,7 +435,12 @@ std::string nextProgram()
     PERFMON_FUNCTION_SCOPE;
     std::lock_guard<std::mutex> lock(g_io_mutex);
     for (std::string line; std::getline(std::cin, line); ) {
-        line = line.substr(line.find('(')); // drop everything before the program
+        auto index = line.find('('); // drop everything before the program
+        if (index != std::string::npos) {
+            line = line.substr(index);
+        } else {
+            continue;
+        }
         while (!line.empty() && ::isspace(static_cast<unsigned char>(line.back()))) {
             line.resize(line.size() - 1);
         }
@@ -430,18 +466,21 @@ void threadMain(const std::vector<uint64_t>& input_values)
             break;
         }
 
-        Block block(0);
-        try {
-            block = parseLambda(program);
-        } catch (const std::exception& ex) {
+        const auto context = jit_context_create();
+        const auto function = parseLambda(context, program);
+        if (!function) {
             std::cerr << "Unable to parse: " << program << '\n';
+            jit_context_destroy(context);
             continue;
         }
 
         std::vector<uint64_t> output_values;
-        PERFMON_STATEMENT("eval")
-        for (uint64_t value : input_values) {
-            output_values.push_back(block.execute({value}));
+        PERFMON_STATEMENT ("eval")
+        for (const uint64_t& value : input_values) {
+            uint64_t result;
+            void* argv[] = { (void*)&value };
+            jit_function_apply(function, argv, &result);
+            output_values.push_back(result);
         }
 
         if (output_values.size() == 1) {
@@ -477,7 +516,6 @@ std::vector<uint64_t> parseArguments(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
-    test_block();
     test_read_block();
 
     if (argc < 2) {
